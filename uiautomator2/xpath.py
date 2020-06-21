@@ -10,7 +10,6 @@ import re
 import logging
 import threading
 import time
-import inspect
 import functools
 from collections import defaultdict
 from types import ModuleType
@@ -24,7 +23,7 @@ from deprecated import deprecated
 import adbutils
 import uiautomator2
 from uiautomator2.exceptions import XPathElementNotFoundError
-from uiautomator2.utils import U
+from uiautomator2.utils import U, inject_call
 from uiautomator2.abcd import BasicUIMeta
 
 try:
@@ -56,7 +55,7 @@ def strict_xpath(xpath: str, logger=logger) -> str:
     """ make xpath to be computer recognized xpath """
     orig_xpath = xpath
 
-    if xpath.startswith('//'):
+    if xpath.startswith('/'):
         pass
     elif xpath.startswith('@'):
         xpath = '//*[@resource-id={!r}]'.format(xpath[1:])
@@ -66,23 +65,19 @@ def strict_xpath(xpath: str, logger=logger) -> str:
     #     key = xpath[1:]
     #     return self(self.__alias_get(key), source)
     elif xpath.startswith('%') and xpath.endswith("%"):
-        xpath = '//*[contains(@text, {})]'.format(string_quote(
-            xpath[1:-1]))
-    elif xpath.startswith('%'): # ends-with
+        xpath = '//*[contains(@text, {})]'.format(string_quote(xpath[1:-1]))
+    elif xpath.startswith('%'):  # ends-with
         text = xpath[1:]
-        xpath = '//*[{!r} = substring(@text, string-length(@text) - {} + 1)]'.format(text, len(text))
-    elif xpath.endswith('%'): # starts-with
+        xpath = '//*[{!r} = substring(@text, string-length(@text) - {} + 1)]'.format(
+            text, len(text))
+    elif xpath.endswith('%'):  # starts-with
         text = xpath[:-1]
         xpath = "//*[starts-with(@text, {!r})]".format(text)
-        # text = xpath[:-1]
-        # for c in ".*[]?-":
-        #     text = text.replace(c, "\\"+c)
-        # xpath = '//*[ re:match(@text, {})]'.format(string_quote(text))
     else:
-        xpath = '//*[@text={0} or @content-desc={0}]'.format(
+        xpath = '//*[@text={0} or @content-desc={0} or @resource-id={0}]'.format(
             string_quote(xpath))
 
-    logger.debug("xpath %s -> %s", orig_xpath, xpath)
+    # logger.debug("xpath %s -> %s", orig_xpath, xpath)
     return xpath
 
 
@@ -98,19 +93,19 @@ class UIMeta(metaclass=abc.ABCMeta):
     @abc.abstractmethod
     def click(self, x: int, y: int):
         pass
-    
+
     @abc.abstractmethod
     def swipe(self, fx: int, fy: int, tx: int, ty: int, duration: float):
         """ duration is float type, indicate seconds """
-    
+
     @abc.abstractmethod
     def window_size(self) -> tuple:
         """ return (width, height) """
-    
+
     @abc.abstractmethod
     def dump_hierarchy(self) -> str:
         """ return xml content """
-    
+
     @abc.abstractmethod
     def screenshot(self):
         """ return PIL.Image.Image """
@@ -130,8 +125,8 @@ class XPath(object):
         assert hasattr(d, "screenshot")
         assert hasattr(d, 'wait_timeout')
 
-        self._click_before_delay = 0.0 # pre delay
-        self._click_after_delay = None # post delay
+        self._click_before_delay = 0.0  # pre delay
+        self._click_after_delay = None  # post delay
         self._last_source = None
         self._event_callbacks = defaultdict(list)
 
@@ -145,7 +140,7 @@ class XPath(object):
         self._logger = setup_logger()
         self._logger.setLevel(logging.INFO)
 
-    def global_set(self, key, value):  #dicts):
+    def global_set(self, key, value):
         valid_keys = {
             "timeout", "alias", "alias_strict", "click_after_delay",
             "click_before_delay"
@@ -160,10 +155,10 @@ class XPath(object):
     def implicitly_wait(self, timeout):
         """ set default timeout when click """
         self._d.wait_timeout = timeout
-    
+
     @property
     def logger(self):
-        expect_level = logging.DEBUG if self._d.settings['xpath_debug'] else logging.INFO
+        expect_level = logging.DEBUG if self._d.settings['xpath_debug'] else logging.INFO # yapf: disable
         if expect_level != self._logger.level:
             self._logger.setLevel(expect_level)
         return self._logger
@@ -171,7 +166,7 @@ class XPath(object):
     @property
     def wait_timeout(self):
         return self._d.wait_timeout
-    
+
     @property
     def _watcher(self):
         return self._d.watcher
@@ -180,17 +175,20 @@ class XPath(object):
         with self._dump_lock:
             self._last_source = self._d.dump_hierarchy()
             return self._last_source
-    
+
     def get_last_hierarchy(self):
         return self._last_source
 
     def add_event_listener(self, event_name, callback):
         self._event_callbacks[event_name] += [callback]
 
+    # def register_callback(action: str, callback):
+    #     pass
+
     def send_click(self, x, y):
         if self._click_before_delay:
             self.logger.debug("click before delay %.1f seconds",
-                         self._click_after_delay)
+                              self._click_after_delay)
             time.sleep(self._click_before_delay)
 
         # TODO(ssx): should use a better way
@@ -202,8 +200,11 @@ class XPath(object):
 
         if self._click_after_delay:
             self.logger.debug("click after delay %.1f seconds",
-                         self._click_after_delay)
+                              self._click_after_delay)
             time.sleep(self._click_after_delay)
+
+    def send_longclick(self, x, y):
+        self._d.long_click(x, y)
 
     def send_swipe(self, sx, sy, tx, ty):
         self._d.swipe(sx, sy, tx, ty)
@@ -288,47 +289,53 @@ class XPath(object):
             left_time = max(0, deadline - time.time())
             time.sleep(min(0.5, left_time))
 
-    def click(self, xpath, source=None, watch=None, timeout=None, pre_delay:float=None):
-        """
-        Args:
-            xpath (str): xpath string
-            watch (bool): click popup elements (deprecated)
-            timeout (float): pass
-            pre_delay (float): pre delay wait time before click
-
-        Raises:
-            TimeoutException
-        """
+    def _get_after_watch(self, xpath: Union[str, list], timeout=None):
+        if timeout == 0:
+            timeout = .01
         timeout = timeout or self.wait_timeout
         self.logger.info("XPath(timeout %.1f) %s", timeout, xpath)
-
-        # d.set_run_watcher_before_click(True)
-        # watch = False
-        # if watch is None:
-        #     watch = not self._watcher.running()
-
         deadline = time.time() + timeout
         while True:
             source = self.dump_hierarchy()
-            # if watch and self._watcher.run(source):
-            #     time.sleep(.5)  # post delay
-            #     deadline = time.time() + timeout # correct deadline
-            #     continue
 
             selector = self(xpath, source)
             if selector.exists:
-                if pre_delay:
-                    self.logger.debug("pre-delay %.1f seconds", pre_delay)
-                    time.sleep(pre_delay)
-                selector.get_last_match().click()
-                time.sleep(.5)  # post sleep
-                return
+                return selector.get_last_match()
 
             if time.time() > deadline:
                 break
             time.sleep(.5)
 
         raise TimeoutException("timeout %.1f, xpath: %s" % (timeout, xpath))
+
+    def click(self,
+              xpath: Union[str, list],
+              timeout=None,
+              pre_delay: float = None):
+        """
+        Find element and perform click
+
+        Args:
+            xpath (str): xpath string
+            timeout (float): pass
+            pre_delay (float): pre delay wait time before click
+
+        Raises:
+            TimeoutException
+        """
+        el = self._get_after_watch(xpath, timeout)
+        el.click()  # 100ms
+
+    def scroll_to(self, xpath: str, direction='up', max_swipes=10):
+        """
+        Need more tests
+        scroll up the whole screen until target element founded
+        """
+        assert max_swipes > 0
+        for i in range(max_swipes):
+            if self(xpath).exists:
+                return
+            self._d.swipe_ext(direction, 0.5)
 
     def __alias_get(self, key, default=None):
         """
@@ -352,16 +359,43 @@ class XPathSelector(object):
 
         self._parent = parent
         self._d = parent._d
-        self._xpath_list = [strict_xpath(xpath, self.logger)] if isinstance(xpath, str) else xpath
+        self._xpath_list = [strict_xpath(xpath, self.logger)] if isinstance(
+            xpath, str) else xpath
         self._source = source
         self._last_source = None
-        self._watchers = []
-        
-        self.click = functools.partial(self._parent.click, self._xpath_list) # parent click
+        self._position = None
+        self._fallback = None
+
+    def __str__(self):
+        return f"XPathSelector({'|'.join(self._xpath_list)}"
 
     def xpath(self, xpath: str):
         xpath = strict_xpath(xpath, self.logger)
         self._xpath_list.append(xpath)
+        return self
+
+    def position(self, x: float, y: float):
+        """ set possible position """
+        assert 0 < x < 1
+        assert 0 < y < 1
+        self._position = (x, y)
+        return self
+
+    def fallback(self, func=None, *args, **kwargs):
+        """
+        callback on failure
+        """
+        if isinstance(func, str):
+            if func == "click":
+                if len(args) == 0:
+                    args = self._position
+                func = lambda d: d.click(*args)
+            else:
+                raise ValueError(
+                    "func should be \"click\" or callable function")
+
+        assert callable(func)
+        self._fallback = func
         return self
 
     @property
@@ -376,34 +410,68 @@ class XPathSelector(object):
         xml_content = source or self._source or self._parent.dump_hierarchy()
         self._last_source = xml_content
 
+        # run-watchers
+        if not source and not self._source:
+            trigger_count = 0
+            for _ in range(5): # trigger for most 5 times
+                triggered = self._parent._watcher.run(xml_content)
+                if not triggered:
+                    break
+                trigger_count += 1
+                xml_content = self._parent.dump_hierarchy()
+            if trigger_count:
+                self.logger.debug("watcher triggered %d times", trigger_count)
+
         root = etree.fromstring(str2bytes(xml_content))
         for node in root.xpath("//node"):
             node.tag = safe_xmlstr(node.attrib.pop("class", "")) or "node"
-        
+
         match_sets = []
         for xpath in self._xpath_list:
-            matches = root.xpath(xpath,
+            matches = root.xpath(
+                xpath,
                 namespaces={"re": "http://exslt.org/regular-expressions"})
             match_sets.append(matches)
         # find out nodes which match all xpaths
-        match_nodes = functools.reduce(lambda x, y: set(x).intersection(y), match_sets)
-        return [XMLElement(node, self._parent) for node in match_nodes]
+        match_nodes = functools.reduce(lambda x, y: set(x).intersection(y),
+                                       match_sets)
+        els = [XMLElement(node, self._parent) for node in match_nodes]
+        if not self._position:
+            return els
+
+        # 中心点应控制在控件内
+        inside_els = []
+        px, py = self._position
+        for e in els:
+            lpx, lpy, rpx, rpy = e.percent_bounds()
+            # 中心点偏移百分比不应大于控件宽高的50%
+            scale = 1.5
+
+            if abs(px - (lpx + rpx) / 2) > (rpx - lpx) * .5 * scale:
+                continue
+            if abs(py - (lpy + rpy) / 2) > (rpy - lpy) * .5 * scale:
+                continue
+            inside_els.append(e)
+        return inside_els
 
     @property
     def exists(self):
         return len(self.all()) > 0
 
-    def get(self):
+    def get(self, timeout=None):
         """
         Get first matched element
 
+        Args:
+            timeout (float): max seconds to wait
+
         Returns:
             XMLElement
-        
+
         Raises:
             XPathElementNotFoundError
         """
-        if not self.wait(self._global_timeout):
+        if not self.wait(timeout or self._global_timeout):
             raise XPathElementNotFoundError(self._xpath_list)
         return self.get_last_match()
 
@@ -413,7 +481,7 @@ class XPathSelector(object):
     def get_text(self):
         """
         get element text
-        
+
         Returns:
             string of node text
 
@@ -424,7 +492,7 @@ class XPathSelector(object):
 
     def set_text(self, text: str = ""):
         el = self.get()
-        self._parent.send_text()  # switch ime
+        self._d.set_fastinput_ime() # switch ime
         el.click()  # focus input-area
         self._parent.send_text(text)
 
@@ -438,16 +506,25 @@ class XPathSelector(object):
         """
         deadline = time.time() + (timeout or self._global_timeout)
         while time.time() < deadline:
+            # self.logger.debug("wait %s left %.1fs", self, deadline-time.time())
             if self.exists:
                 return self.get_last_match()
             time.sleep(.2)
         return None
-    
+
+    def match(self):
+        """
+        Returns:
+            None or matched XPathElement
+        """
+        if self.exists:
+            return self.get_last_match()
+
     def wait_gone(self, timeout=None):
         """
         Args:
             timeout (float): seconds
-        
+
         Returns:
             True if gone else False
         """
@@ -463,9 +540,42 @@ class XPathSelector(object):
         self.logger.info("click %d, %d", x, y)
         self._parent.send_click(x, y)
 
+    def click(self, timeout=None):
+        """ find element and perform click """
+        try:
+            el = self.get(timeout=timeout)
+            el.click()
+        except XPathElementNotFoundError:
+            if not self._fallback:
+                raise
+            self.logger.info("element not found, run fallback")
+            return inject_call(self._fallback, d=self._d)
+    
+    def click_exists(self, timeout=None):
+        el = self.wait(timeout=timeout)
+        if el:
+            el.click()
+            return True
+        return False
+
+    def long_click(self):
+        """ find element and perform long click """
+        self.get().long_click()
+
     def screenshot(self) -> Image.Image:
+        """ take element screenshot """
         el = self.get()
         return el.screenshot()
+    
+    def __getattr__(self, key: str):
+        """
+        In IPython console, attr:_ipython_canary_method_should_not_exist_ will be called
+        So here ignore all attr startswith _
+        """
+        if key.startswith("_"):
+            raise AttributeError("Invalid attr", key)
+        el = self.get()
+        return getattr(el, key)
 
 
 class XMLElement(object):
@@ -477,6 +587,7 @@ class XMLElement(object):
         """
         self.elem = elem
         self._parent = parent
+        self._d = parent._d
 
     def center(self):
         """
@@ -492,7 +603,7 @@ class XMLElement(object):
         Args:
             px (float): percent of width
             py (float): percent of height
-        
+
         Example:
             offset(0.5, 0.5) means center
         """
@@ -501,10 +612,17 @@ class XMLElement(object):
 
     def click(self):
         """
-        click element
+        click element, 100ms between down and up
         """
         x, y = self.center()
         self._parent.send_click(x, y)
+
+    def long_click(self):
+        """
+        Sometime long click is needed, 400ms between down and up
+        """
+        x, y = self.center()
+        self._parent.send_longclick(x, y)
 
     def screenshot(self):
         """
@@ -513,12 +631,13 @@ class XMLElement(object):
         im = self._parent.take_screenshot()
         return im.crop(self.bounds)
 
-    def swipe(self, direction: str, scale: float = 0.9):
+    def swipe(self, direction: str, scale: float = 0.5):
         """
         Args:
             direction: one of ["left", "right", "up", "down"]
             scale: percent of swipe, range (0, 1.0)
         """
+
         def _swipe(_from, _to):
             self._parent.send_swipe(_from[0], _from[1], _to[0], _to[1])
 
@@ -530,7 +649,7 @@ class XMLElement(object):
         h_offset = int(width * (1 - scale)) // 2
         v_offset = int(height * (1 - scale)) // 2
 
-        left = lx+h_offset, ly + height // 2
+        left = lx + h_offset, ly + height // 2
         up = lx + width // 2, ly + v_offset
         right = rx - h_offset, ly + height // 2
         bottom = lx + width // 2, ry - v_offset
@@ -550,10 +669,10 @@ class XMLElement(object):
         """ Returns:
                 (float, float): eg, (0.5, 0.5) means 50%, 50%
         """
-        ww, wh = self._parent.window_size()
+        ww, wh = self._d.window_size()
         _, _, w, h = self.rect
-        return (w/ww, wh/h)
-        
+        return (w / ww, h / wh)
+
     @property
     def bounds(self):
         """
@@ -563,6 +682,14 @@ class XMLElement(object):
         bounds = self.elem.attrib.get("bounds")
         lx, ly, rx, ry = map(int, re.findall(r"\d+", bounds))
         return (lx, ly, rx, ry)
+
+    def percent_bounds(self):
+        """ Returns:
+            list of 4 float, eg: 0.1, 0.2, 0.5, 0.8
+        """
+        lx, ly, rx, ry = self.bounds
+        ww, wh = self._d.window_size()
+        return (lx / ww, ly / wh, rx / ww, ry / wh)
 
     @property
     def rect(self):
@@ -580,11 +707,12 @@ class XMLElement(object):
     @property
     def attrib(self):
         return self.elem.attrib
-    
+
     @property
     def info(self):
         ret = {}
-        for key in ("text", "focusable", "enabled", "focused", "scrollable", "selected"):
+        for key in ("text", "focusable", "enabled", "focused", "scrollable",
+                    "selected"):
             ret[key] = self.attrib.get(key)
         ret["className"] = self.elem.tag
         lx, ly, rx, ry = self.bounds
@@ -599,43 +727,46 @@ class AdbUI(BasicUIMeta):
     """
     Use adb command to run ui test
     """
+
     def __init__(self, d: adbutils.AdbDevice):
         self._d = d
 
     def click(self, x, y):
         self._d.click(x, y)
-    
+
     def swipe(self, sx, sy, ex, ey, duration):
         self._d.swipe(sx, sy, ex, ey, duration)
-    
+
     def window_size(self):
         w, h = self._d.window_size()
         return w, h
-    
+
     def dump_hierarchy(self):
         return self._d.dump_hierarchy()
-    
+
     def screenshot(self):
         d = self._d
-        json_output = d.shell(["LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-i", "2&>/dev/null"]).strip()
+        json_output = d.shell([
+            "LD_LIBRARY_PATH=/data/local/tmp", "/data/local/tmp/minicap", "-i",
+            "2&>/dev/null"
+        ]).strip()
         data = json.loads(json_output)
         w, h, r = data["width"], data["height"], data["rotation"]
         remote_image_path = "/sdcard/minicap.jpg"
         d.shell(["rm", remote_image_path])
         d.shell([
-            "LD_LIBRARY_PATH=/data/local/tmp", 
-            "/data/local/tmp/minicap", 
-            "-P", "{0}x{1}@{0}x{1}/{2}".format(w, h, r), 
-            "-s", ">"+remote_image_path])
+            "LD_LIBRARY_PATH=/data/local/tmp",
+            "/data/local/tmp/minicap",
+            "-P", "{0}x{1}@{0}x{1}/{2}".format(w, h, r),
+            "-s", ">" + remote_image_path]) # yapf: disable
 
         if d.sync.stat(remote_image_path).size == 0:
             raise RuntimeError("screenshot using minicap error")
-        
+
         buf = io.BytesIO()
         for data in d.sync.iter_content(remote_image_path):
             buf.write(data)
         return Image.open(buf)
-
 
 
 if __name__ == "__main__":

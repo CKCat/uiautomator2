@@ -36,7 +36,7 @@
 
 ## Requirements
 - Android版本 4.4+
-- Python 3.6+ (社区反馈 3.8还不支持）
+- Python 3.6+ (社区反馈3.8.0不支持, 但是3.8.2支持）
 
 >如果用python2的pip安装，会安装本库的老版本0.2.3；如果用python3.5的pip安装，会安装本库的老版本0.3.3；两者均已经不会再维护；PYPI上的最近版本是这个：https://pypi.org/project/uiautomator2/
 
@@ -111,6 +111,10 @@ Thank you to all our sponsors! ✨🍰✨
   - **[Input method](#input-method)**
   - **[Toast](#toast)**
   - **[XPath](#xpath)**
+  - **[Screenrecord](#screenrecord)**
+  - **[Image match](#image-match)**
+
+**[相关文章推荐](#article-recommended)**
 
 **常见问题**
   - **[停止UiAutomator守护服务，释放AccessibilityService](#stop-uiautomator)**
@@ -270,13 +274,6 @@ If this environment variable is empty, uiautomator will fall back to `connect_us
 
     
 # API Documents
-## Global settings (全局配置）
-This part contains some global settings
-
-```python
-d.settings['xpath_debug'] = True # 开启xpath插件的调试功能
-d.settings['wait_timeout'] = 20.0 # 默认控件等待时间（原生操作，xpath插件的等待时间）
-```
 
 ### New command timeout
 How long (in seconds) will wait for a new command from the client before assuming the client quit and ending the uiautomator service （Default 3 minutes）
@@ -1032,7 +1029,14 @@ Selector supports below parameters. Refer to [UiSelector Java doc](http://develo
     x, y = d(text="Settings").center()
     # x, y = d(text="Settings").center(offset=(0, 0)) # left-top x, y
     ```
-    
+
+* Take screenshot of widget
+
+    ```python
+    im = d(text="Settings").screenshot()
+    im.save("settings.jpg")
+    ```
+
 #### Perform the click action on the selected UI object
 * Perform click on the specific   object
 
@@ -1183,6 +1187,12 @@ d.watcher("ANR").when(xpath="ANR").when("Force Close").click()
 # 其他回调例子
 d.watcher.when("抢红包").press("back")
 d.watcher.when("//*[@text = 'Out of memory']").call(lambda d: d.shell('am force-stop com.im.qq'))
+
+# 回调说明
+def click_callback(d: u2.Device):
+    d.xpath("确定").click() # 在回调中调用不会再次触发watcher
+
+d.xpath("继续").click() # 使用d.xpath检查元素的时候，会触发watcher（目前最多触发5次）
 ```
 
 监控操作
@@ -1211,13 +1221,50 @@ d.watcher.reset()
 另外文档还是有很多没有写，推荐直接去看源码[watcher.py](uiautomator2/watcher.py)
 
 ### Global settings
-```python
-# set delay 1.5s after each UI click and click
-d.click_post_delay = 1.5 # default no delay
 
-# set default element wait timeout (seconds)
-d.wait_timeout = 30.0 # default 20.0
+```python
+d.HTTP_TIMEOUT = 60 # 默认值60s, http默认请求超时时间
+
+# 当设备掉线时，等待设备在线时长，仅当TMQ=true时有效，支持通过环境变量 WAIT_FOR_DEVICE_TIMEOUT 设置
+d.WAIT_FOR_DEVICE_TIMEOUT = 70 
 ```
+
+其他的配置，目前已大部分集中到 `d.settings` 中，根据后期的需求配置可能会有增减。
+
+```python
+print(d.settings)
+{'operation_delay': (0, 0),
+ 'operation_delay_methods': ['click', 'swipe'],
+ 'wait_timeout': 20.0,
+ 'xpath_debug': False}
+
+# 配置点击前延时0.5s，点击后延时1s
+d.settings['operation_delay'] = (.5, 1)
+
+# 修改延迟生效的方法
+# 其中 double_click, long_click 都对应click
+d.settings['operation_delay_methods'] = ['click', 'swipe', 'drag', 'press']
+
+d.settings['xpath_debug'] = True # 开启xpath插件的调试日志
+d.settings['wait_timeout'] = 20.0 # 默认控件等待时间（原生操作，xpath插件的等待时间）
+```
+
+对于随着版本升级，设置过期的配置时，会提示Deprecated，但是不会抛异常。
+
+```bash
+>>> d.settings['click_before_delay'] = 1  
+[W 200514 14:55:59 settings:72] d.settings[click_before_delay] deprecated: Use operation_delay instead
+```
+
+**uiautomator恢复方式设置**
+
+细心的你可能发现，实际上手机安装了两个APK，一个在前台可见（小黄车）。一个包名为`com.github.uiautomator.test`在后台不可见。这两个apk使用同一个证书签名的。
+不可见的应用实际上是一个测试包，包含有所有的测试代码，核心的测试服务也是通过其启动的。
+但是运行的时候，系统却需要那个小黄车一直在运行（在后台运行也可以）。一旦小黄车应用被杀，后台运行的测试服务也很快的会被杀掉。就算什么也不做，应用应用在后台，也会很快被系统回收掉。（这里希望高手指点一下，如何才能不依赖小黄车应用，感觉理论上是可以的，但是目前我还不会）。
+
+~~让小黄车在后台运行有两种方式，一种启动应用后，放到后台（默认）。另外通过`am startservice`启动一个后台服务也行。~~
+
+~~通过 `d.settings["uiautomator_runtest_app_background"] = True` 可以调整该行为。True代表启动应用，False代表启动服务。~~
 
 UiAutomator中的超时设置(隐藏方法)
 
@@ -1335,6 +1382,51 @@ for elem in d.xpath("//android.widget.TextView").all():
 
 点击查看[其他XPath常见用法](XPATH.md)
 
+### Screenrecord
+视频录制
+
+这里没有使用手机中自带的screenrecord命令，是通过获取手机图片合成视频的方法，所以需要安装一些其他的依赖，如imageio, imageio-ffmpeg, numpy等
+因为有些依赖比较大，推荐使用镜像安装。直接运行下面的命令即可。
+
+```bash
+pip3 install -U "uiautomator2[image]" -i https://pypi.doubanio.com/simple
+```
+
+使用方法
+
+```
+d.screenrecord('output.mp4')
+
+time.sleep(10)
+# or do something else
+
+d.screenrecord.stop() # 停止录制后，output.mp4文件才能打开
+```
+
+录制的时候也可以指定fps（当前是20），这个值是率低于minicap输出图片的速度，感觉已经很好了，不建议你修改。
+
+### Image match
+图像匹配，在使用这个功能之前你需要先把依赖安装上
+
+```bash
+pip3 install -U "uiautomator2[image]" -i https://pypi.doubanio.com/simple
+```
+
+目前开放两个接口
+ 
+```
+imdata = "target.png" # 也可以是URL, PIL.Image或OpenCV打开的图像
+
+d.image.match(imdata) 
+# 匹配待查找的图片，立刻返回一个结果
+# 返回一个dict, eg: {"similarity": 0.9, "point": [200, 300]}
+
+d.image.click(imdata, timeout=20.0)
+# 在20s的时间内调用match轮询查找图片，当similarity>0.9时，执行点击操作
+```
+
+该功能还在完善中，图片需要手机的原图裁剪后的图才可以。
+
 # 常见问题
 很多没写在这个地方的，都放到了这里 [Common Issues](https://github.com/openatx/uiautomator2/wiki/Common-issues)
 
@@ -1359,6 +1451,11 @@ d.service("uiautomator").stop()
 ```
 
 [ATX与Maxim共存AccessibilityService的方法](https://testerhome.com/topics/17179)
+
+# Article Recommended
+优秀文章推荐 (欢迎QQ群里at我反馈）
+
+- [termux里如何部署uiautomator2简介](https://www.cnblogs.com/ze-yan/p/12242383.html) by `成都-测试只会一点点`
 
 # 项目历史
 * 项目重构自 <https://github.com/xiaocong/uiautomator>

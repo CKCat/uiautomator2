@@ -16,7 +16,8 @@ import six
 from retry import retry
 
 from uiautomator2.exceptions import (RetryError, NullPointerExceptionError,
-                                     UiObjectNotFoundError, UiautomatorQuitError)
+                                     UiObjectNotFoundError,
+                                     UiautomatorQuitError)
 from uiautomator2.utils import Exists, U, check_alive, hooks_wrap, intersect, cache_return
 from uiautomator2.swipe import SwipeExt
 
@@ -83,7 +84,7 @@ class Session(object):
         """ Update package running pid """
         self._pid = pid
         jsonrpc_url = self.server.path2url('/session/%d:%s/jsonrpc/0' %
-                                          (pid, self._pkg_name))
+                                           (pid, self._pkg_name))
         self._jsonrpc = self.server.setup_jsonrpc(jsonrpc_url)
 
     @property
@@ -91,11 +92,14 @@ class Session(object):
     def widget(self):
         from uiautomator2.widget import Widget
         return Widget(self)
-    
+
     @property
     @cache_return
     def swipe_ext(self):
         return SwipeExt(self.server)
+    
+    def _find_element(self, xpath: str, _class=None, pos=None, activity=None, package=None):
+        raise NotImplementedError()
 
     def implicitly_wait(self, seconds=None):
         """set default wait timeout
@@ -118,7 +122,7 @@ class Session(object):
         """ close app """
         if self._pkg_name:
             self.server.app_stop(self._pkg_name)
-    
+
     def restart(self, use_monkey=False):
         """
         Stop app and start
@@ -352,14 +356,24 @@ class Session(object):
 
         class _Touch(object):
             def down(self, x, y):
+                x, y = obj.pos_rel2abs(x, y)
                 obj.jsonrpc.injectInputEvent(ACTION_DOWN, x, y, 0)
+                return self
 
             def move(self, x, y):
+                x, y = obj.pos_rel2abs(x, y)
                 obj.jsonrpc.injectInputEvent(ACTION_MOVE, x, y, 0)
+                return self
 
             def up(self, x, y):
                 """ ACTION_UP x, y """
+                x, y = obj.pos_rel2abs(x, y)
                 obj.jsonrpc.injectInputEvent(ACTION_UP, x, y, 0)
+                return self
+            
+            def sleep(self, seconds: float):
+                time.sleep(seconds)
+                return self
 
         return _Touch()
 
@@ -455,7 +469,7 @@ class Session(object):
         return self.jsonrpc.drag(sx, sy, ex, ey, int(duration * 200))
 
     @retry((IOError, SyntaxError), delay=.5, tries=5, jitter=0.1,
-           max_delay=1)  # delay .5, .6, .7, .8 ...
+           max_delay=1, logger=logging)  # delay .5, .6, .7, .8 ...
     def screenshot(self, filename=None, format='pillow'):
         """
         Image format is JPEG
@@ -468,19 +482,25 @@ class Session(object):
             IOError, SyntaxError
 
         Examples:
+            screenshot().save("saved.png") # 推荐
             screenshot("saved.jpg")
-            screenshot().save("saved.png")
             cv2.imwrite('saved.jpg', screenshot(format='opencv'))
         """
+        # Another way to take screenshot is use jsonrpc
+        # self.jsonrpc.takeScreenshot(1.0, 70) # scale, quality -> base64
+
         r = requests.get(self.server.screenshot_uri, timeout=10)
         if filename:
             with open(filename, 'wb') as f:
                 f.write(r.content)
             return filename
         elif format == 'pillow':
-            from PIL import Image
-            buff = io.BytesIO(r.content)
-            return Image.open(buff)
+            try:
+                from PIL import Image
+                buff = io.BytesIO(r.content)
+                return Image.open(buff).convert("RGB")
+            except Exception as ex:
+                raise IOError("PIL.Image.open IOError", ex)
         elif format == 'opencv':
             import cv2
             import numpy as np
@@ -491,7 +511,7 @@ class Session(object):
         else:
             raise RuntimeError("Invalid format " + format)
 
-    @retry(RetryError, delay=1.0, tries=2) 
+    @retry(RetryError, delay=1.0, tries=2)
     def dump_hierarchy(self, compressed=False, pretty=False) -> str:
         """
         Args:
@@ -593,7 +613,31 @@ class Session(object):
         self.jsonrpc.setClipboard(label, text)
 
     def __getattr__(self, key):
-        if key in ["wait_timeout", "window_size", "shell", "xpath", "widget", "watcher", "settings"]:
+        if key in [
+                "alibaba", # plugin
+                "app_current",
+                "app_start",
+                "app_stop",
+                "app_stop_all",
+                "app_list",
+                "app_list_running",
+                "app_info",
+                "app_wait",
+                "wait_activity",
+                "wait_timeout",
+                "window_size",
+                "wlan_ip",
+                "widget", # plugin
+                "watcher", # plugin
+                "image", # plugin
+                "jsonrpc",
+                "open_identify",
+                "shell",
+                "set_new_command_timeout",
+                "settings", # plugin
+                "taobao", # plugin
+                "xpath", # plugin
+        ]:
             return getattr(self.server, key)
         raise AttributeError(f"Session object has no attribute '{key}'")
 
